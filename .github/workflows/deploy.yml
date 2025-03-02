@@ -1,0 +1,133 @@
+# 服务器源码拉取部署方案
+name: Server-Side Source Code Deployment
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  APP_NAME: "my-go-app"
+  SERVER_DIR: "/opt/app"
+  REPO_URL: "git@github.com:${{ github.repository }}"  # 仓库 SSH 地址
+  GO_VERSION: "1.21"                                   # 统一 Go 版本
+
+jobs:
+  code-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Tests
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          run: go test -v ./...
+
+  deploy-prod:
+    needs: code-validation
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Prepare Deployment
+        run: echo "Deploying ${{ github.sha }}"
+
+      - name: Setup SSH Agent
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Remote Deployment Commands
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # 初始化部署目录
+            DEPLOY_DIR="${{ env.SERVER_DIR }}/releases/$(date +%Y%m%d%H%M%S)"
+            mkdir -p $DEPLOY_DIR
+
+            # 克隆仓库（使用 SSH 代理）
+            GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git clone \
+              --branch main \
+              --depth 1 \
+              ${{ env.REPO_URL }} \
+              $DEPLOY_DIR/src
+
+            # 配置 Go 环境
+            export PATH=$PATH:/usr/local/go/bin
+            cd $DEPLOY_DIR/src
+            
+            # 安装 Go 版本管理（可选）
+            if ! command -v go &> /dev/null || [ "$(go version | awk '{print $3}')" != "go${{ env.GO_VERSION }}" ]; then
+              wget https://dl.google.com/go/go${{ env.GO_VERSION }}.linux-amd64.tar.gz
+              sudo tar -C /usr/local -xzf go${{ env.GO_VERSION }}.linux-amd64.tar.gz
+            fi
+
+            # 编译应用
+            export CGO_ENABLED=0
+            export GOOS=linux
+            export GOARCH=amd64
+            go build -ldflags="-s -w" -o $DEPLOY_DIR/${{ env.APP_NAME }} ./cmd/main.go
+
+            # 同步配置文件
+            rsync -av config.yaml $DEPLOY_DIR/
+
+            # 更新符号链接
+            ln -sfn $DEPLOY_DIR ${{ env.SERVER_DIR }}/current
+
+            # 重启服务
+            sudo systemctl restart ${{ env.APP_NAME }}.service
+
+            # 清理旧版本（保留最近5个）
+            ls -dt ${{ env.SERVER_DIR }}/releases/* | tail -n +6 | xargs rm -rf
+
+      - name: Verify Deployment
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            # 验证进程状态
+            if ! systemctl is-active --quiet ${{ env.APP_NAME }}.service; then
+              echo "Service is not running!"
+              exit 1
+            fi
+
+            # 验证端口监听
+            if ! sudo lsof -i :8080 | grep LISTEN; then
+              echo "Port 8080 not listening"
+              exit 1
+            fi
+
+  # notify:
+  #   needs: deploy-prod
+  #   if: always()
+  #   runs-on: ubuntu-latest
+  #   steps: 
+  #     # 保留原有通知配置...
+  #     - name: Slack Notification
+  #       if: failure()
+  #       uses: slackapi/slack-github-action@v1.26.0
+  #       with:
+  #         payload: |
+  #           {
+  #             "text": "🚨 部署失败: ${{ github.repository }}@${{ github.sha }}",
+  #             "blocks": [
+  #               {
+  #                 "type": "section",
+  #                 "text": {
+  #                   "type": "mrkdwn",
+  #                   "text": "❌ *Deployment Failed* \n*Repo*: <https://github.com/${{ github.repository }}|${{ github.repository }}> \n*Commit*: <https://github.com/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>"
+  #                 }
+  #               }
+  #             ]
+  #           }
+  #       env:
+  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
