@@ -9,7 +9,7 @@ on:
 env:
   APP_NAME: "my-go-app"
   SERVER_DIR: "/opt/app"
-  REPO_URL: "git@github.com:${{ github.repository }}"  # 仓库 SSH 地址
+  REPO_URL: "git@github.com:bugoutianzhen123/test_ci-cd.git"  # 仓库 SSH 地址 git@github.com:bugoutianzhen123/test_ci-cd.git
   GO_VERSION: "1.21"                                   # 统一 Go 版本
 
 jobs:
